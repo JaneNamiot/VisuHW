@@ -1,0 +1,339 @@
+---
+title: "Prodvinutaya visualization"
+author: "jane"
+date: "2024-11-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+library(GGally)
+library(corrplot)
+library(pheatmap)
+library(factoextra)
+library(plotly)
+library(umap)
+
+
+```
+
+Download the dataset
+
+```{r}
+data <- readRDS("C:/Users/enami/Downloads/very_low_birthweight.RDS")
+```
+
+Find and delete all NAs in columns
+
+```{r}
+na_counts <- colSums(is.na(data))
+data_nona <- data[, na_counts <= 100]
+```
+And now in rows
+
+```{r}
+data_clean <- na.omit(data_nona)
+
+
+```
+
+Lets do the numeric variables density plots
+```{r}
+numeric_v <- data_clean %>% select(where(is.numeric))
+par(mfrow = c(3, 3)) 
+for (var in names(numeric_v)) {
+  plot(density(numeric_v[[var]], na.rm = TRUE),
+       main = paste("Плотность для", var),
+       xlab = var,
+       ylab = "Плотность")
+}
+```
+
+IQR=Q3−Q1
+Нижняя: 
+
+
+Q1−1.5⋅IQR
+Верхняя: 
+
+Q3+1.5⋅IQR
+```{r}
+remove_outlier <- function(data, var) {
+  q <- quantile(data[[var]], probs = c(0.25, 0.75), na.rm = TRUE)
+  iqr <- q[2] - q[1]
+  lower <- q[1] - 1.5 * iqr
+  upper <- q[2] + 1.5 * iqr
+  data %>% filter(data[[var]] >= lower, data[[var]] <= upper)
+}
+####the function on top is supposed to remove outliers based on IQR
+data_nooutlier <- numeric_v
+for (var in names(data_nooutlier)) {
+  data_nooutlier <- remove_outlier(data_nooutlier, var)
+}
+
+```
+Lets do categorical transformation
+```{r}
+categorical_v <- data_clean %>% select(where(is.character))
+categorical_v <- categorical_v %>% mutate(across(everything(), as.factor))
+```
+Graph for two numeric..?
+```{r}
+data_clean <- data_clean %>%
+  mutate(dead = as.factor(dead), pneumo = as.factor(pneumo), inout = as.factor(inout))
+ggplot(data = data_clean, aes(x = pneumo, fill = inout)) +
+  geom_bar(position = "dodge", aes(y = ..count..)) +
+  facet_wrap(~ dead, labeller = labeller(dead = c("0" = "Выжившие", "1" = "Умершие"))) +
+  theme_minimal() +
+  labs(
+    title = "Распределение пневмонии по inout и статусу выживания",
+    x = "Наличие пневмонии",
+    y = "Количество случаев",
+    fill = "In/Out"
+  )
+```
+Please, dont kill me but i will check normality probably
+```{r}
+data_clean %>%
+  group_by(inout) %>%
+  summarise(shapiro = list(shapiro_test(lowph))) %>%
+  unnest(shapiro)
+test <- wilcox_test(data_clean, lowph ~ inout)
+test
+
+data_clean %>%
+  ggplot(aes(x = inout, y = lowph, color = inout)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox.test", label = "p.signif")
+```
+rstatixplot
+```{r}
+library(rstatix)
+ggboxplot(data_clean, x = "inout", y = "lowph",
+          color = "inout", palette = "jco") +
+  stat_compare_means(method = "wilcox.test")
+```
+Значение lowPH статистически значимо отличаются внутри группы inout. Так как, группа transported имеет значимо более низкие уровни pH, то и выживаемость у них будет ожидаться ниже
+```{r}
+datacontinuous <- data_clean %>%
+  select(-c(birth, year, exit)) %>%  
+  select_if(is.numeric)
+cormatrix <- cor(datacontinuous, use = "complete.obs")
+print(cormatrix)
+corrplot(cormatrix, method = "circle", type = "upper", order = "hclust", 
+         col = colorRampPalette(c("darkblue", "white", "darkred"))(200), 
+         tl.col = "black", tl.srt = 45)
+
+heatmap(cormatrix, 
+        col = colorRampPalette(c("blue", "white", "red"))(200),
+        scale = "none",  # не масштабировать данные
+        margins = c(10, 10))
+```
+Иерархическая кластеризация
+```{r}
+distmx <- as.dist(1 - cormatrix)
+hclust <- hclust(distmx, method = "ward.D2")
+plot(hclust, main = "Иерархическая кластеризация", 
+     xlab = "Переменные", sub = "", cex = 0.8)
+```
+Тепловая карта и дендрограмма
+```{r}
+pheatmap(cormatrix,
+         color = colorRampPalette(c("darkblue", "ivory", "darkred"))(200),
+         cluster_rows = hclust,  
+         cluster_cols = hclust,  
+         main = "Тепловая карта и дендрограммы")
+```
+PCA Анализ
+```{r}
+sapply(datacontinuous, range) #разброс значений перемнных отличается значительно требуется шкалирование!
+pca <- prcomp(datacontinuous, scale. = TRUE)
+summary(pca)
+fviz_eig(pca, addlabels = TRUE, ylim = c(0, 100))
+```
+Интерпретация - standard deviation показывает разброс данных вокруг каждой из компонент, где это значение наибольшее (в нашем случае PC1) та компонента лучше всего и объясняет различие данных.Proportion of variance тоже показывает сколько наших данных обьясняет компонента, как и кумулятивная пропорция. В нашем случае наиболее важная компонента - первая
+
+Biplot
+```{r}
+data_dead <- datacontinuous  
+data_dead$dead <- data_clean$dead
+pca <- prcomp(datacontinuous, scale. = TRUE)
+fviz_pca_biplot(pca, 
+                geom.ind = "point",  
+                pointshape = 21,     
+                pointsize = 3,       
+                fill.ind = data_dead$dead,  
+                col.var = "black",  
+                gradient.cols = c("darkblue", "cyan", "darkred"),  
+                repel = TRUE,        
+                legend.title = "Dead")
+```
+transfer to plotly
+```{r}
+
+```
+interactive biplot
+```{r}
+data_clean$id <- seq_len(nrow(data_clean))
+dataid <- data_clean %>%
+  select(-c(birth, year, exit)) %>%
+  select_if(is.numeric)
+dataid$id <- data_clean$id  
+dataid$dead <- data_clean$dead 
+pca <- prcomp(dataid %>% select(-c(id, dead)), scale. = TRUE)
+pca_2 <- as.data.frame(pca$x)
+pca_2$id <- dataid$id  
+pca_2$dead <- dataid$dead
+pca_var <- as.data.frame(pca$rotation)
+pca_var$varnames <- rownames(pca_var)
+fig <- plot_ly() %>%
+  # Добавление точек для наблюдений
+  add_trace(
+    data = pca_2,
+    x = ~PC1, y = ~PC2,
+    type = "scatter",
+    mode = "markers",
+    text = ~paste("ID:", id, "Dead:", dead),  
+    hoverinfo = "text",
+    marker = list(
+      size = 10,
+      color = ~dead,  
+      colorscale = "RdBu",
+      showscale = TRUE
+    )
+  ) %>%
+  
+  add_trace(
+    data = pca_var,
+    x = c(rep(0, nrow(pca_var)), pca_var$PC1 * 5),  
+    y = c(rep(0, nrow(pca_var)), pca_var$PC2 * 5),
+    type = "scatter",
+    mode = "lines+text",
+    line = list(color = "black"),
+    text = c(rep("", nrow(pca_var)), pca_var$varnames),  
+    textposition = "top right",
+    hoverinfo = "text"
+  ) %>%
+  layout(
+    title = "PCA Biplot (Interactive)",
+    xaxis = list(title = "PC1"),
+    yaxis = list(title = "PC2"),
+    showlegend = FALSE
+  )
+
+
+fig
+
+```
+
+Мы не выявили причинно-следственной связи между выживаемостью и распределением другим данных, нам все равно нужно проводить дополнительный анализ выживаемости, метод главных компонент поможет нам лишь отобрать те данные, которые с большей вероятностью предскажут dead статус.
+Dead переменная также принимает только два значения 0 и 1 (нет и да), а для PCA нам нужны непрерывные переменные
+
+UMAP
+```{r}
+pca <- prcomp(dataid %>% select(-c(id, dead)), scale. = TRUE)
+pca_d <- as.data.frame(pca$x)
+pca_d$id <- dataid$id
+pca_d$dead <- dataid$dead
+
+
+umap <- umap(dataid %>% select(-c(id, dead)))
+
+
+umap_d <- as.data.frame(umap$layout)
+umap_d$id <- dataid$id
+umap_d$dead <- dataid$dead
+
+
+pcaplot <- ggplot(pca_d, aes(x = PC1, y = PC2, color = as.factor(dead))) +
+  geom_point() +
+  labs(title = "PCA ", color = "Dead") +
+  theme_minimal()
+
+
+umapplot <- ggplot(umap_d, aes(x = V1, y = V2, color = as.factor(dead))) +
+  geom_point() +
+  labs(title = "UMAP ", color = "Dead") +
+  theme_minimal()
+
+library(gridExtra)
+grid.arrange(pcaplot, umapplot, ncol = 2)
+```
+UMAP change distance (я не поняла, нужно ли нам опять делать раскраску по переменной dead, сделала ее в прошлом примере навсякий случай, но дальше не буду)
+```{r}
+umap_res_1 <- umap(dataid %>% select(-c(id, dead)), 
+                   n_neighbors = 10, min_dist = 0.1)
+umap_data_1 <- as.data.frame(umap_res_1$layout)
+umap_plot_1 <- ggplot(umap_data_1, aes(x = V1, y = V2)) +
+  geom_point(color = "pink") +
+  labs(title = "UMAP") +
+  theme_minimal()
+
+umap_plot_1  
+```
+Результат - дата стала менее структурированной (нет четкого выделения кластеров, как в прошлых примерах). Я считаю, что это связано с тем что я уменьшила дистанцию и соседей и алгоритм теперь основывается на локальных связях между точками и старается их группировать компактно между собой, при этом мы упускаем глобальную структуру данных
+
+Permutation task
+```{r}
+data_clean$bwt_50 <- data_clean$bwt
+num_rows <- nrow(data_clean)
+num_permuted <- round(num_rows * 0.5)
+perm_indices <- sample(1:num_rows, num_permuted)
+data_clean$bwt_50[perm_indices] <- sample(data_clean$bwt_50[perm_indices])
+data_clean$bwt_100 <- sample(data_clean$bwt)
+perform_pca <- function(data, column_name) {
+  data_numeric <- data %>% select(-c(birth, year, exit, column_name)) %>% select_if(is.numeric)
+  pca <- prcomp(data_numeric, scale. = TRUE)
+  pca_result <- summary(pca)
+  return(pca_result)
+}
+
+
+perform_umap <- function(data, column_name) {
+  data_numeric <- data %>% select(-c(birth, year, exit, column_name)) %>% select_if(is.numeric)
+  umap_model <- umap(data_numeric)
+  return(umap_model$layout)
+}
+pca_original <- perform_pca(data_clean, 'bwt')
+pca_original
+
+umap_original <- perform_umap(data_clean, 'bwt')
+umap_original
+
+pca_50 <- perform_pca(data_clean, 'bwt_50')
+pca_50
+
+umap_50 <- perform_umap(data_clean, 'bwt_50')
+umap_50
+
+pca_100 <- perform_pca(data_clean, 'bwt_100')
+pca_100
+umap_100 <- perform_umap(data_clean, 'bwt_100')
+umap_100
+
+ggplot(data.frame(PC1 = pca_original$x[,1], PC2 = pca_original$x[,2]), aes(x = PC1, y = PC2)) + 
+  geom_point() + ggtitle("PCA - O")
+
+ggplot(data.frame(PC1 = pca_50$x[,1], PC2 = pca_50$x[,2]), aes(x = PC1, y = PC2)) + 
+  geom_point() + ggtitle("PCA - 50% ")
+
+ggplot(data.frame(PC1 = pca_100$x[,1], PC2 = pca_100$x[,2]), aes(x = PC1, y = PC2)) + 
+  geom_point() + ggtitle("PCA - 100% ")
+
+
+ggplot(data.frame(UMAP1 = umap_original[,1], UMAP2 = umap_original[,2]), aes(x = UMAP1, y = UMAP2)) + 
+  geom_point() + ggtitle("UMAP - Orig")
+
+ggplot(data.frame(UMAP1 = umap_50[,1], UMAP2 = umap_50[,2]), aes(x = UMAP1, y = UMAP2)) + 
+  geom_point() + ggtitle("UMAP - 50% ")
+
+ggplot(data.frame(UMAP1 = umap_100[,1], UMAP2 = umap_100[,2]), aes(x = UMAP1, y = UMAP2)) + 
+  geom_point() + ggtitle("UMAP - 100% ")
+
+```
+Честно говоря я не понимаю, что происходит, по визуализации как будто кумулятивная не должна меняться, просто новые кластеры появляются, но общий результат должен быть похожим
+
+Если вам не трудно, могли бы вы в фидбеке обьяснить, как правильно интерпретировать и как делать последние два пункта :) Я сдаюсь...
